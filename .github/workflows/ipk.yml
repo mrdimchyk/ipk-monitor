@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       test_email:
-        description: "Send SMTP test email"
+        description: "Send Brevo test email"
         required: false
         default: false
         type: boolean
@@ -30,10 +30,9 @@ jobs:
         run: pip install -r requirements.txt
       - name: Collect new IPKs and send digest
         env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          BREVO_API_KEY: ${{ secrets.BREVO_API_KEY }}
+          BREVO_SENDER_EMAIL: ${{ secrets.BREVO_SENDER_EMAIL }}
+          BREVO_SENDER_NAME: ${{ secrets.BREVO_SENDER_NAME }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
         run: |
           if [ "${{ inputs.test_email }}" = "true" ]; then
