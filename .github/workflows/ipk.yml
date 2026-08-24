@@ -22,14 +22,14 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run VOBU scraper smoke test
-        run: python scraper.py --max-pages 1 --overlap-days 7 --max-new-details 10
+      - name: Run VOBU scraper bounded collection
+        run: python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50
       - name: Show collected state
         run: |
           python - <<'PY'
           import sqlite3
           db = sqlite3.connect('ipk.sqlite3')
-          rows = db.execute('select ipk_date, number, source_url from ipk order by ipk_date desc, id desc limit 10').fetchall()
+          rows = db.execute('select ipk_date, number, source_url from ipk order by ipk_date desc, id desc limit 15').fetchall()
           print('DB rows:', db.execute('select count(*) from ipk').fetchone()[0])
           for row in rows:
               print(row)
