@@ -12,24 +12,41 @@ function doGet(e) {
 }
 
 function setup() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  let ss;
+  if (id) {
+    ss = SpreadsheetApp.openById(id);
+  } else {
+    ss = SpreadsheetApp.create('IPK Monitor — Subscribers');
+    id = ss.getId();
+    PropertiesService.getScriptProperties().setProperty('SPREADSHEET_ID', id);
+  }
   let sheet = ss.getSheetByName(SHEET_NAME);
   if (!sheet) sheet = ss.insertSheet(SHEET_NAME);
   if (sheet.getLastRow() === 0) sheet.appendRow(['email', 'created_at', 'active']);
+
   let token = PropertiesService.getScriptProperties().getProperty('API_TOKEN');
   if (!token) {
     token = Utilities.getUuid().replace(/-/g, '') + Utilities.getUuid().replace(/-/g, '');
     PropertiesService.getScriptProperties().setProperty('API_TOKEN', token);
   }
+  Logger.log('SPREADSHEET_URL=' + ss.getUrl());
   Logger.log('API_TOKEN=' + token);
-  return token;
+  return {spreadsheetUrl:ss.getUrl(), apiToken:token};
+}
+
+function getSpreadsheet_() {
+  let id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  if (!id) setup();
+  id = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  return SpreadsheetApp.openById(id);
 }
 
 function addSubscriber(email) {
   email = String(email || '').trim().toLowerCase();
   if (!isValidEmail_(email)) throw new Error('Введіть коректну електронну адресу.');
-  let sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  if (!sheet) { setup(); sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME); }
+  const ss = getSpreadsheet_();
+  const sheet = ss.getSheetByName(SHEET_NAME);
   const values = sheet.getDataRange().getValues();
   for (let i = 1; i < values.length; i++) {
     if (String(values[i][0]).trim().toLowerCase() === email) {
@@ -42,7 +59,7 @@ function addSubscriber(email) {
 }
 
 function listSubscribers_() {
-  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  const sheet = getSpreadsheet_().getSheetByName(SHEET_NAME);
   if (!sheet || sheet.getLastRow() < 2) return [];
   const values = sheet.getDataRange().getValues();
   const out = [];
