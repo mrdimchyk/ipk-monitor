@@ -215,15 +215,47 @@ def digest_text(records):
         return "Нових ІПК не знайдено."
     return "\n".join([f"Нових ІПК: {len(records)}", ""] + [f"{r.ipk_date} | {r.number} | {r.url}" for r in records])
 
+def get_recipients():
+    subscribers_url = os.getenv("SUBSCRIBERS_URL", "").strip()
+    subscribers_token = os.getenv("SUBSCRIBERS_TOKEN", "").strip()
+    legacy = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
+
+    if subscribers_url:
+        if not subscribers_token:
+            raise RuntimeError("SUBSCRIBERS_URL is set but SUBSCRIBERS_TOKEN is missing")
+        try:
+            r = requests.get(
+                subscribers_url,
+                params={"action": "list", "token": subscribers_token},
+                timeout=20,
+                headers={"User-Agent": "IPK-Digest/2.3"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("ok"):
+                raise RuntimeError("Subscriber service rejected the request")
+            recipients = [str(x).strip() for x in data.get("subscribers", []) if str(x).strip()]
+            recipients.extend(legacy)
+            recipients = list(dict.fromkeys(recipients))
+            print(f"[SUBSCRIBERS] active={len(recipients)}")
+            return recipients
+        except Exception as exc:
+            raise RuntimeError(f"Unable to load subscribers: {exc}") from exc
+
+    if legacy:
+        print(f"[SUBSCRIBERS] using MAIL_TO fallback: {len(legacy)}")
+        return list(dict.fromkeys(legacy))
+    raise RuntimeError("No recipients configured. Set SUBSCRIBERS_URL/SUBSCRIBERS_TOKEN or MAIL_TO")
+
 def send_email(records, subject=None, body=None):
-    required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "MAIL_TO"]
+    required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"]
     missing = [x for x in required if not os.getenv(x)]
     if missing:
         raise RuntimeError("Missing secrets: " + ", ".join(missing))
 
-    recipients = [x.strip() for x in os.environ["MAIL_TO"].split(",") if x.strip()]
+    recipients = get_recipients()
     if not recipients:
-        raise RuntimeError("MAIL_TO is empty")
+        raise RuntimeError("Subscriber list is empty")
 
     msg = EmailMessage()
     msg["From"] = os.environ["SMTP_USER"]
@@ -233,13 +265,12 @@ def send_email(records, subject=None, body=None):
     msg.add_alternative(digest_html(records), subtype="html")
 
     port = int(os.environ["SMTP_PORT"])
+    context = ssl.create_default_context()
     if port == 465:
-        context = ssl.create_default_context()
         with smtplib.SMTP_SSL(os.environ["SMTP_HOST"], port, context=context, timeout=30) as server:
             server.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
             server.send_message(msg)
     else:
-        context = ssl.create_default_context()
         with smtplib.SMTP(os.environ["SMTP_HOST"], port, timeout=30) as server:
             server.starttls(context=context)
             server.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
