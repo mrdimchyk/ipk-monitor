@@ -214,7 +214,7 @@ def digest_text(records):
         return "Нових ІПК не знайдено."
     return "\n".join([f"Нових ІПК: {len(records)}", ""] + [f"{r.ipk_date} | {r.number} | {r.url}" for r in records])
 
-def send_email(records):
+def send_email(records, subject=None, body=None):
     required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "MAIL_TO"]
     missing = [x for x in required if not os.getenv(x)]
     if missing:
@@ -222,8 +222,8 @@ def send_email(records):
     msg = EmailMessage()
     msg["From"] = os.environ["SMTP_USER"]
     msg["To"] = os.environ["MAIL_TO"]
-    msg["Subject"] = f"Нові ІПК — {date.today().strftime('%d.%m.%Y')}"
-    msg.set_content(digest_text(records))
+    msg["Subject"] = subject or f"Нові ІПК — {date.today().strftime('%d.%m.%Y')}"
+    msg.set_content(body if body is not None else digest_text(records))
     msg.add_alternative(digest_html(records), subtype="html")
     with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as smtp:
         smtp.starttls()
@@ -238,12 +238,16 @@ def main():
     p.add_argument("--max-new-details", type=int, default=10)
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
+    p.add_argument("--test-email", action="store_true", help="Send a test email even when there are no new IPKs")
     p.add_argument("--strict-tls", action="store_true", help="Do not allow the known VOBU mirror certificate workaround")
     args = p.parse_args()
     scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
     print(digest_text(new_records))
-    if args.send_email and new_records:
+    if args.test_email:
+        send_email([], subject=f"IPK scraper SMTP test — {date.today().strftime('%d.%m.%Y')}", body="SMTP test успішний. GitHub Actions має доступ до Gmail SMTP secrets.")
+        print("[MAIL] SMTP test email sent.")
+    elif args.send_email and new_records:
         send_email(new_records)
 
 if __name__ == "__main__":
