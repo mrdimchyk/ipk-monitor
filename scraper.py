@@ -7,6 +7,7 @@ import sqlite3
 import smtplib
 import sys
 import time
+import urllib3
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from email.message import EmailMessage
@@ -17,6 +18,8 @@ import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://peredplata.vobu.ua/"
+PRIMARY_URL = "https://ipk.vobu.ua/"
+MIRROR_HOST = "peredplata.vobu.ua"
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 IPK_RE = re.compile(r"\d{1,6}/ІПК/[0-9A-ZА-ЯІЇЄҐ-]+(?:-[0-9A-ZА-ЯІЇЄҐ]+)*(?:\s+ІПК)?", re.I)
 
@@ -52,20 +55,32 @@ class Record:
     content: str = ""
 
 class Scraper:
-    def __init__(self, db_path="ipk.sqlite3", timeout=30, delay=0.2):
+    def __init__(self, db_path="ipk.sqlite3", timeout=30, delay=0.2, allow_insecure_mirror=True):
         self.db = sqlite3.connect(db_path)
         self.db.executescript(SCHEMA)
         self.db.commit()
         self.delay = delay
+        self.allow_insecure_mirror = allow_insecure_mirror
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; IPK-Digest/2.1)",
+            "User-Agent": "Mozilla/5.0 (compatible; IPK-Digest/2.2)",
             "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.7",
         })
         self.timeout = timeout
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     def get(self, url):
-        r = self.session.get(url, timeout=self.timeout)
+        host = urlparse(url).hostname or ""
+        verify = not (host == MIRROR_HOST and self.allow_insecure_mirror)
+        if not verify:
+            print("[WARN] VOBU mirror certificate hostname mismatch; using TLS with certificate verification disabled for this known public host only.", file=sys.stderr)
+        try:
+            r = self.session.get(url, timeout=self.timeout, verify=verify)
+        except requests.exceptions.SSLError:
+            if host == MIRROR_HOST and self.allow_insecure_mirror:
+                r = self.session.get(url, timeout=self.timeout, verify=False)
+            else:
+                raise
         r.raise_for_status()
         r.encoding = r.apparent_encoding or r.encoding
         return r
@@ -223,8 +238,9 @@ def main():
     p.add_argument("--max-new-details", type=int, default=10)
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
+    p.add_argument("--strict-tls", action="store_true", help="Do not allow the known VOBU mirror certificate workaround")
     args = p.parse_args()
-    scraper = Scraper(args.db, delay=args.delay)
+    scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
     print(digest_text(new_records))
     if args.send_email and new_records:
