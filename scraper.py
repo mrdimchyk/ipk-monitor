@@ -4,10 +4,8 @@ import hashlib
 import os
 import re
 import sqlite3
-import smtplib
 import sys
 import time
-import urllib3
 from dataclasses import dataclass
 from datetime import datetime, date, timedelta
 from email.message import EmailMessage
@@ -16,10 +14,12 @@ from html import escape
 
 import requests
 from bs4 import BeautifulSoup
+import urllib3
 
 BASE_URL = "https://peredplata.vobu.ua/"
 PRIMARY_URL = "https://ipk.vobu.ua/"
 MIRROR_HOST = "peredplata.vobu.ua"
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 IPK_RE = re.compile(r"\d{1,6}/ІПК/[0-9A-ZА-ЯІЇЄҐ-]+(?:-[0-9A-ZА-ЯІЇЄҐ]+)*(?:\s+ІПК)?", re.I)
 
@@ -215,20 +215,39 @@ def digest_text(records):
     return "\n".join([f"Нових ІПК: {len(records)}", ""] + [f"{r.ipk_date} | {r.number} | {r.url}" for r in records])
 
 def send_email(records, subject=None, body=None):
-    required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "MAIL_TO"]
+    required = ["BREVO_API_KEY", "BREVO_SENDER_EMAIL", "MAIL_TO"]
     missing = [x for x in required if not os.getenv(x)]
     if missing:
         raise RuntimeError("Missing secrets: " + ", ".join(missing))
-    msg = EmailMessage()
-    msg["From"] = os.environ["SMTP_USER"]
-    msg["To"] = os.environ["MAIL_TO"]
-    msg["Subject"] = subject or f"Нові ІПК — {date.today().strftime('%d.%m.%Y')}"
-    msg.set_content(body if body is not None else digest_text(records))
-    msg.add_alternative(digest_html(records), subtype="html")
-    with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"]), timeout=30) as smtp:
-        smtp.starttls()
-        smtp.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-        smtp.send_message(msg)
+
+    recipients = [x.strip() for x in os.environ["MAIL_TO"].split(",") if x.strip()]
+    if not recipients:
+        raise RuntimeError("MAIL_TO is empty")
+
+    payload = {
+        "sender": {
+            "email": os.environ["BREVO_SENDER_EMAIL"],
+            "name": os.getenv("BREVO_SENDER_NAME", "IPK Monitor"),
+        },
+        "to": [{"email": address} for address in recipients],
+        "subject": subject or f"Нові ІПК — {date.today().strftime('%d.%m.%Y')}",
+        "textContent": body if body is not None else digest_text(records),
+        "htmlContent": digest_html(records),
+    }
+
+    response = requests.post(
+        BREVO_API_URL,
+        headers={
+            "accept": "application/json",
+            "api-key": os.environ["BREVO_API_KEY"],
+            "content-type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Brevo API error {response.status_code}: {response.text[:1000]}")
+    print(f"[MAIL] Brevo accepted message for {len(recipients)} recipient(s).")
 
 def main():
     p = argparse.ArgumentParser()
@@ -245,8 +264,7 @@ def main():
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
     print(digest_text(new_records))
     if args.test_email:
-        send_email([], subject=f"IPK scraper SMTP test — {date.today().strftime('%d.%m.%Y')}", body="SMTP test успішний. GitHub Actions має доступ до Gmail SMTP secrets.")
-        print("[MAIL] SMTP test email sent.")
+        send_email([], subject=f"IPK Monitor test — {date.today().strftime('%d.%m.%Y')}", body="Тестова розсилка IPK Monitor через Brevo API успішна.")
     elif args.send_email and new_records:
         send_email(new_records)
 
