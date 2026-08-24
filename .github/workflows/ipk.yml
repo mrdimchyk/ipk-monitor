@@ -2,6 +2,12 @@ name: IPK daily collector
 
 on:
   workflow_dispatch:
+    inputs:
+      test_email:
+        description: "Send SMTP test email"
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
   schedule:
@@ -29,7 +35,12 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
-        run: python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --send-email
+        run: |
+          if [ "${{ inputs.test_email }}" = "true" ]; then
+            python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --test-email
+          else
+            python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --send-email
+          fi
       - name: Show collected state
         run: |
           python - <<'PY'
