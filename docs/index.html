@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ІПК Monitor — підписка</title>
+  <style>
+    body{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:0 auto;padding:48px 20px;line-height:1.5;background:#f7f7f7;color:#222}
+    .card{background:#fff;padding:32px;border-radius:16px;box-shadow:0 4px 20px #0001} h1{margin-top:0}
+    input,button{width:100%;box-sizing:border-box;padding:13px 14px;border-radius:10px;font-size:16px} input{border:1px solid #ccc;margin:8px 0 14px} button{border:0;background:#222;color:#fff;cursor:pointer}
+    label{display:block;margin:8px 0} small{color:#666}.ok{display:none;margin-top:18px;padding:12px;border-radius:10px;background:#eef7ee}
+  </style>
+</head>
+<body><main class="card">
+  <h1>ІПК Monitor</h1>
+  <p>Отримуйте повідомлення про нові індивідуальні податкові консультації на електронну пошту.</p>
+  <form id="subscribe">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" autocomplete="email" required placeholder="you@example.com">
+    <label><input type="checkbox" name="all" checked> Усі нові ІПК</label>
+    <button type="submit">Підписатися</button>
+  </form>
+  <div id="ok" class="ok">Дякуємо! Якщо адреса коректна, на неї буде надіслано лист для підтвердження підписки.</div>
+  <p><small>Після підтвердження email ви зможете отримувати розсилку та відписатися за посиланням у будь-якому листі.</small></p>
+</main>
+<script>
+const API_URL='https://YOUR-WORKER.workers.dev/subscribe';
+document.querySelector('#subscribe').addEventListener('submit',async e=>{e.preventDefault();const email=document.querySelector('#email').value.trim();try{const r=await fetch(API_URL,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email})});if(!r.ok)throw new Error();document.querySelector('#subscribe').style.display='none';document.querySelector('#ok').style.display='block'}catch(err){alert('Не вдалося оформити підписку. Спробуйте ще раз.')}});
+</script></body></html>
