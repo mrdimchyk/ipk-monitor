@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run VOBU scraper bounded collection
+      - name: Run VOBU scraper
         run: python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50
       - name: Show collected state
         run: |
@@ -34,6 +34,15 @@ jobs:
           for row in rows:
               print(row)
           PY
+      - name: Send email digest
+        if: success()
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python scraper.py --db ipk.sqlite3 --max-pages 0 --max-new-details 0 --send-email
       - name: Save SQLite state
         run: |
           git config user.name "IPK Bot"
