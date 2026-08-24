@@ -16,7 +16,7 @@ from html import escape
 import requests
 from bs4 import BeautifulSoup
 
-BASE_URL = "https://ipk.vobu.ua/"
+BASE_URL = "https://peredplata.vobu.ua/"
 DATE_RE = re.compile(r"\b(\d{2}\.\d{2}\.\d{4})\b")
 IPK_RE = re.compile(r"\d{1,6}/ІПК/[0-9A-ZА-ЯІЇЄҐ-]+(?:-[0-9A-ZА-ЯІЇЄҐ]+)*(?:\s+ІПК)?", re.I)
 
@@ -59,7 +59,7 @@ class Scraper:
         self.delay = delay
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; IPK-Digest/2.0)",
+            "User-Agent": "Mozilla/5.0 (compatible; IPK-Digest/2.1)",
             "Accept-Language": "uk-UA,uk;q=0.9,en;q=0.7",
         })
         self.timeout = timeout
@@ -129,8 +129,12 @@ class Scraper:
         rec.content = "\n".join(filtered).strip()
         return rec
 
-    def exists(self, url):
-        return self.db.execute("SELECT 1 FROM ipk WHERE source_url=?", (url,)).fetchone() is not None
+    def exists(self, rec):
+        row = self.db.execute(
+            "SELECT 1 FROM ipk WHERE source_url=? OR source_id=? OR number=? LIMIT 1",
+            (rec.url, rec.source_id, rec.number),
+        ).fetchone()
+        return row is not None
 
     def save(self, rec):
         now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
@@ -166,7 +170,7 @@ class Scraper:
             for rec in records:
                 if cutoff and date.fromisoformat(rec.ipk_date) < cutoff:
                     continue
-                if self.exists(rec.url):
+                if self.exists(rec):
                     continue
                 if len(found) >= max_new_details:
                     break
