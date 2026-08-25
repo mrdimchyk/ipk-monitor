@@ -88,7 +88,7 @@ class Scraper:
 
     @staticmethod
     def clean(s):
-        return re.sub(r"[ \t\r\f\v]+", " ", s or "").strip()
+        return re.sub(r"[ \\t\\r\\f\\v]+", " ", s or "").strip()
 
     @staticmethod
     def iso_date(value):
@@ -286,8 +286,13 @@ def main():
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
     p.add_argument("--test-email", action="store_true", help="Send a test email even when there are no new IPKs")
+    p.add_argument("--check-subscribers", action="store_true", help="Validate subscriber endpoint and print active count without scraping or sending mail")
     p.add_argument("--strict-tls", action="store_true", help="Do not allow the known VOBU mirror certificate workaround")
     args = p.parse_args()
+    if args.check_subscribers:
+        recipients = get_recipients()
+        print(f"Subscriber check OK: {len(recipients)} active recipient(s).")
+        return
     scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
     print(digest_text(new_records))
