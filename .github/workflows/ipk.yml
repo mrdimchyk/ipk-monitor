@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      check_subscribers:
+        description: "Check subscriber service only"
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [main]
   schedule:
@@ -38,12 +43,15 @@ jobs:
           SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}
           SUBSCRIBERS_TOKEN: ${{ secrets.SUBSCRIBERS_TOKEN }}
         run: |
-          if [ "${{ inputs.test_email }}" = "true" ]; then
+          if [ "${{ inputs.check_subscribers }}" = "true" ]; then
+            python scraper.py --check-subscribers
+          elif [ "${{ inputs.test_email }}" = "true" ]; then
             python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --test-email
           else
             python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --send-email
           fi
       - name: Show collected state
+        if: ${{ inputs.check_subscribers != 'true' }}
         run: |
           python - <<'PY'
           import sqlite3
@@ -54,6 +62,7 @@ jobs:
               print(row)
           PY
       - name: Save SQLite state
+        if: ${{ inputs.check_subscribers != 'true' }}
         run: |
           git config user.name "IPK Bot"
           git config user.email "ipk-bot@users.noreply.github.com"
