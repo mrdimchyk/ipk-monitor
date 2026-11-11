@@ -67,6 +67,8 @@ jobs:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
           MAIL_TO: ${{ secrets.MAIL_TO }}
+          # Dedicated monitoring mailbox, independently of the legacy MAIL_TO secret.
+          MONITOR_MAILBOX: ipk.monitor.ua@gmail.com
           SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}
           SUBSCRIBERS_TOKEN: ${{ secrets.SUBSCRIBERS_TOKEN }}
         run: |
@@ -75,7 +77,7 @@ jobs:
           elif [ "${{ inputs.test_email }}" = "true" ]; then
             python scraper.py --max-pages 8 --max-new-details 120 --test-email
           else
-            python scraper.py --max-pages 8 --max-new-details 120 --send-email
+            python scraper.py --max-pages 8 --max-new-details 120 --send-email --descriptive-recap-once
           fi
       - name: Show collected state
         if: ${{ always() && hashFiles('ipk.sqlite3') != '' && inputs.check_subscribers != true }}
