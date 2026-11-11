@@ -308,7 +308,7 @@ class Scraper:
         return found
 
 def _shorten(text, max_chars=330):
-    text = re.sub(r"\\s+", " ", text or "").strip()
+    text = re.sub(r"\s+", " ", text or "").strip()
     if len(text) <= max_chars:
         return text
     trimmed = text[:max_chars].rsplit(" ", 1)[0]
@@ -317,14 +317,14 @@ def _shorten(text, max_chars=330):
 
 def describe_consultation(rec):
     """Source-based, non-AI description; never fabricate a tax conclusion."""
-    raw = re.sub(r"\\s+", " ", rec.content or "").strip()
+    raw = re.sub(r"\s+", " ", rec.content or "").strip()
     if not raw:
         return ("Зміст документа не вдалося виділити автоматично. "
                 "Перевірте повний текст за посиланням.", "")
     # Most IPKs open with identical legal headers, which are not useful summaries.
-    intro = re.search(r"\\b(?:Товариство|Підприємство|Платник податків|"
+    intro = re.search(r"\b(?:Товариство|Підприємство|Платник податків|"
                       r"Фізична особа|Підприємець|ФОП|Заявник|"
-                      r"У зверненні|У запиті|У листі)\\b", raw, re.I)
+                      r"У зверненні|У запиті|У листі)\b", raw, re.I)
     if intro and intro.start() < 3500:
         body = raw[intro.start():]
     else:
@@ -333,8 +333,8 @@ def describe_consultation(rec):
     # For the "position" field take only a source fragment after a strong
     # conclusion cue; exclude the standard 52.2 IPK personal-effect disclaimer.
     conclusions = list(re.finditer(
-        r"\\b(?:Таким чином|Отже|З огляду на викладене|"
-        r"Враховуючи викладене|Враховуючи наведене|Зважаючи на викладене)\\b",
+        r"\b(?:Таким чином|Отже|З огляду на викладене|"
+        r"Враховуючи викладене|Враховуючи наведене|Зважаючи на викладене)\b",
         raw, re.I))
     conclusion = ""
     for match in reversed(conclusions):
@@ -349,6 +349,15 @@ def describe_consultation(rec):
     return (question or "Перегляньте повний текст ІПК.", conclusion)
 
 
+def display_consultation(rec):
+    """Return question, authority's position, impact, and AI-grounding flag."""
+    ai = getattr(rec, "ai_summary", None)
+    if isinstance(ai, dict) and ai.get("question") and ai.get("position"):
+        return (ai["question"], ai["position"], ai.get("impact", ""), True)
+    question, position = describe_consultation(rec)
+    return question, position, "", False
+
+
 def digest_html(records):
     today = date.today().strftime("%d.%m.%Y")
     if not records:
@@ -357,22 +366,25 @@ def digest_html(records):
         '<!doctype html><html lang="uk"><body style="font-family:Arial,sans-serif;color:#202b24">',
         f'<h2>ІПК з описом — {escape(today)}</h2>',
         f'<p>Консультацій у листі: <b>{len(records)}</b>.</p>',
-        '<p style="color:#555">Описи формуються автоматично з тексту ІПК без ШІ; '
-        'це фрагменти джерела, а не юридичні висновки.</p>'
+        '<p style="color:#555">Короткий виклад формує Gemini на основі текстів ІПК. '
+        'Коли ШІ недоступний, показано фрагменти джерела. '
+        'Це інформаційний огляд, а не юридичний висновок.</p>'
     ]
     for rec in records:
-        question, conclusion = describe_consultation(rec)
+        question, conclusion, impact, is_ai = display_consultation(rec)
         parts.extend([
             '<section style="padding:12px 0;border-top:1px solid #d9e2dc">',
             f'<h3 style="margin:4px 0">ІПК № {escape(rec.number)}</h3>',
             f'<p><b>Дата:</b> {escape(rec.ipk_date)}'
             f' &nbsp; <b>Рубрика:</b> {escape(rec.category or "Не вказано")}</p>',
-            f'<p><b>Суть питання (фрагмент):</b> {escape(question)}</p>',
+            f'<p><b>{"Питання платника (Gemini):" if is_ai else "Суть питання (фрагмент):"}</b> {escape(question)}</p>',
         ])
         if conclusion:
             parts.append(
-                f'<p><b>Позиція з тексту ІПК (фрагмент):</b> {escape(conclusion)}</p>'
+                f'<p><b>{"Позиція ДПС (Gemini):" if is_ai else "Позиція з тексту ІПК (фрагмент):"}</b> {escape(conclusion)}</p>'
             )
+        if impact:
+            parts.append(f'<p><b>Практичне значення (Gemini):</b> {escape(impact)}</p>')
         parts.append(
             f'<p><a href="{escape(rec.url, quote=True)}">Повний текст ІПК</a></p></section>'
         )
@@ -380,23 +392,26 @@ def digest_html(records):
         '<p style="color:#777;font-size:12px">ІПК має індивідуальний характер. '
         'Перед застосуванням висновків перевірте оригінал документа.</p></body></html>'
     )
-    return "\\n".join(parts)
+    return "\n".join(parts)
 
 
 def digest_text(records):
     if not records:
         return "Нових ІПК не виявлено."
     parts = [f"ІПК з описом: {len(records)}", "",
-             "Автоматичні фрагменти тексту, а не юридичні висновки.", ""]
+             "Опис Gemini за текстом ІПК; коли Gemini недоступний — фрагмент джерела.",
+             "Інформаційний огляд, не юридичний висновок.", ""]
     for rec in records:
-        question, conclusion = describe_consultation(rec)
+        question, conclusion, impact, is_ai = display_consultation(rec)
         parts.extend([f"ІПК № {rec.number} ({rec.ipk_date})",
                       f"Рубрика: {rec.category}",
-                      f"Суть питання (фрагмент): {question}"])
+                      f"{'Питання платника (Gemini)' if is_ai else 'Суть питання (фрагмент)'}: {question}"])
         if conclusion:
-            parts.append(f"Позиція з тексту (фрагмент): {conclusion}")
+            parts.append(f"{'Позиція ДПС (Gemini)' if is_ai else 'Позиція з тексту (фрагмент)'}: {conclusion}")
+        if impact:
+            parts.append(f"Практичне значення (Gemini): {impact}")
         parts.extend([f"Джерело: {rec.url}", ""])
-    return "\\n".join(parts)
+    return "\n".join(parts)
 
 
 def get_recipients():
@@ -433,7 +448,7 @@ def get_recipients():
     seen, out = set(), []
     for item in recipients:
         email = item.strip().lower()
-        if not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
             continue
         if email not in seen:
             out.append(email)
@@ -482,7 +497,8 @@ def main():
     p.add_argument("--max-new-details", type=int, default=120)
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
-    p.add_argument("--descriptive-recap-once", action="store_true", help="One-time recap of recently delivered link-only IPKs with source descriptions")
+    p.add_argument("--descriptive-recap-once", action="store_true", help="One-time descriptive recap for the last 36 hours")
+    p.add_argument("--test-gemini", action="store_true", help="Test Gemini API on one stored document; no email")
     p.add_argument("--test-email", action="store_true", help="Send a test email even when there are no new IPKs")
     p.add_argument("--check-subscribers", action="store_true", help="Validate subscriber endpoint and print active count without scraping or sending mail")
     p.add_argument("--strict-tls", action="store_true", help="Do not allow the known VOBU mirror certificate workaround")
@@ -490,6 +506,26 @@ def main():
     if args.check_subscribers:
         recipients = get_recipients()
         print(f"Subscriber check OK: {len(recipients)} active recipient(s).")
+        return
+    if args.test_gemini:
+        from gemini_digest import _summarize_batch, MODEL
+        key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not key:
+            raise RuntimeError("GEMINI_API_KEY is not available to workflow")
+        db = sqlite3.connect(args.db)
+        row = db.execute(
+            """SELECT source_url, source_id, number, ipk_date, issuer,
+                      category, title, content FROM ipk
+               WHERE length(content)>150 ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+        if not row:
+            raise RuntimeError("No stored consultation with sufficient text for test")
+        result = _summarize_batch(
+            [Record(*row)], key, os.getenv("GEMINI_MODEL", MODEL))
+        if not result:
+            raise RuntimeError("Gemini returned no usable description")
+        print("[GEMINI] API test successful, one grounded summary received.")
+        db.close()
         return
     run_started_at = datetime.now(timezone.utc).isoformat()
     scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
@@ -502,6 +538,8 @@ def main():
     elif args.send_email and pending:
         for offset in range(0, len(pending), 50):
             batch = pending[offset:offset + 50]
+            from gemini_digest import enrich_records
+            enrich_records(batch, scraper.db)
             send_email(batch)
             scraper.mark_emailed(batch)
             print(f"[OUTBOX] accepted={len(batch)} remaining={len(scraper.pending_records())}")
@@ -514,6 +552,8 @@ def main():
         print(f"[RECAP] pending_descriptive={len(recap)}")
         for offset in range(0, len(recap), 50):
             batch = recap[offset:offset + 50]
+            from gemini_digest import enrich_records
+            enrich_records(batch, scraper.db)
             send_email(
                 batch,
                 subject=(f"IPK Monitor — описи ІПК (відновлення) "
