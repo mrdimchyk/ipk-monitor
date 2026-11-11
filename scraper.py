@@ -328,7 +328,7 @@ def describe_consultation(rec):
     if intro and intro.start() < 3500:
         body = raw[intro.start():]
     else:
-        marker = re.search(r"повідомляє\\s*[.:]", raw[:2500], re.I)
+        marker = re.search(r"повідомляє\s*[.:]", raw[:2500], re.I)
         body = raw[marker.end():].strip() if marker else raw
     # For the "position" field take only a source fragment after a strong
     # conclusion cue; exclude the standard 52.2 IPK personal-effect disclaimer.
@@ -339,7 +339,7 @@ def describe_consultation(rec):
     conclusion = ""
     for match in reversed(conclusions):
         fragment = raw[match.start():]
-        if "індивідуальний характер" in fragment[:240].lower():
+        if "індивідуальний характер" in fragment[:70].lower():
             continue
         if match.start() < len(raw) * 0.25:
             continue
