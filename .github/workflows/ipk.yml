@@ -13,10 +13,16 @@ on:
         required: false
         default: false
         type: boolean
+      test_gemini:
+        description: "Verify Gemini key and model on one stored document, without emailing"
+        required: false
+        default: false
+        type: boolean
   pull_request:
     branches: [main]
     paths:
       - "scraper.py"
+      - "gemini_digest.py"
       - "tests/**"
       - ".github/workflows/ipk.yml"
       - "requirements.txt"
@@ -71,9 +77,14 @@ jobs:
           MONITOR_MAILBOX: ipk.monitor.ua@gmail.com
           SUBSCRIBERS_URL: ${{ secrets.SUBSCRIBERS_URL }}
           SUBSCRIBERS_TOKEN: ${{ secrets.SUBSCRIBERS_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.1-flash-lite
+          GEMINI_MAX_REQUESTS: "16"
         run: |
           if [ "${{ inputs.check_subscribers }}" = "true" ]; then
             python scraper.py --check-subscribers
+          elif [ "${{ inputs.test_gemini }}" = "true" ]; then
+            python scraper.py --test-gemini
           elif [ "${{ inputs.test_email }}" = "true" ]; then
             python scraper.py --max-pages 8 --max-new-details 120 --test-email
           else
