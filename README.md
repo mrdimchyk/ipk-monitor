@@ -101,3 +101,64 @@ fixed. Do not extend insecure TLS to other hosts.
 
 VOBU is a secondary publication resource. For substantive legal
 interpretations, check the original official tax authority source.
+
+
+## IPK descriptions and monitoring mailbox (November 11 fix)
+
+- The GitHub digest now includes the consultation number, original document
+  date, category, a short **source-based question excerpt**, a selected
+  concluding excerpt where present, and the direct source link.
+- This is **not a Gemini/AI interpretation**. It must not be presented as
+  legal advice, an official conclusion applying to other taxpayers, or proof
+  that the consulted authority changed the general law.
+- The dedicated monitoring mailbox `ipk.monitor.ua@gmail.com` is copied
+  on emails in addition to `MAIL_TO` and any authenticated subscriber
+  endpoint recipients. Duplicates are removed.
+- If the subscription service is unavailable, a warning is logged and
+  delivery uses the known fallback plus monitoring mailbox.
+- On the first production run of this version, the collector sends a
+  one-time, separately labeled **descriptive recap** of recently
+  delivered link-only records (up to 200 in 36 hours, batches of 50).
+  Accepted recap batches are recorded to avoid replay on a partial failure.
+  After completion, a SQLite marker disables all future recap mail.
+- New items have descriptions immediately in their normal digest even if
+  Gemini is unavailable.
+- The legacy Google Apps Script with Gemini summarization is **not**
+  deployed or changed by this GitHub repository. The separately deployed
+  Apps Script project and its execution logs require access to that project.
+  Do not delete its triggers until the source-based digest is acceptable.
+
+Email acceptance by SMTP is not identical to inbox delivery. Check the
+monitoring mailbox's inbox and spam after the rollout.
+
+## Gemini — описи ІПК (з 11.11.2026)
+
+У `Settings → Secrets and variables → Actions → Repository secrets` додайте
+`GEMINI_API_KEY`. Значення ключа не розміщується у вихідному коді чи листах.
+Програмна інтеграція використовує Google Gemini REST `generateContent` із
+моделлю `gemini-3.1-flash-lite` (змінна `GEMINI_MODEL` у workflow).
+
+Для кожної консультації лист містить **питання платника, позицію ДПС,
+практичне значення для підприємства та посилання на першоджерело**.
+Позначка `(Gemini)` чітко відрізняє модельний виклад від фрагментів
+першоджерела. Це інформаційний огляд, а не офіційна консультація.
+
+Система робить групові запити по 5 документів, обмежує кількість викликів
+за запуск (типово 16 на партію до 50 ІПК), використовує кеш у SQLite і
+переходить на фрагменти першоджерела в разі помилки, ліміту, відсутності
+ключа або недоступного тексту. **Ключ не виводиться в журнали.**
+
+Для перевірки ключа без email відкрийте
+[GitHub Actions](https://github.com/mrdimchyk/ipk-monitor/actions/workflows/ipk.yml),
+оберіть `Run workflow`, поставте `test_gemini=true` і перевірте рядок
+`[GEMINI] API test successful` у журналі. Важливо: звичайні запуски можуть
+надсилати лист із фрагментами джерела навіть коли Gemini недоступний.
+
+До розсилки включено `ipk.monitor.ua@gmail.com` незалежно від
+старого `MAIL_TO`, тому обидві адреси можуть одержувати копії. Для
+остаточного виключення старого адресата змініть або видаліть `MAIL_TO`
+після підтвердження отримання листа на контрольній скриньці.
+
+Відновлювальні листи з описами консультацій, які нещодавно отримали лише
+посилання, надсилаються один раз, без повтору за кожного запуску; їхній
+статус зберігається в SQLite.
