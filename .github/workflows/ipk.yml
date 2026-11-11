@@ -13,16 +13,43 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    branches: [main]
+    paths:
+      - "scraper.py"
+      - "tests/**"
+      - ".github/workflows/ipk.yml"
+      - "requirements.txt"
   push:
     branches: [main]
+  # GitHub may delay scheduled runs. This approximates 07:30 winter/08:30 summer Kyiv time.
   schedule:
-    - cron: "0 7 * * *"
+    - cron: "30 5 * * *"
 
 permissions:
   contents: write
+  issues: write
+
+concurrency:
+  group: ipk-collector-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run regression tests
+        run: python -m unittest discover -s tests -v
+
   collect:
+    needs: verify
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -33,7 +60,7 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Collect new IPKs and send digest
+      - name: Collect new IPKs and deliver pending mail
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
@@ -46,26 +73,57 @@ jobs:
           if [ "${{ inputs.check_subscribers }}" = "true" ]; then
             python scraper.py --check-subscribers
           elif [ "${{ inputs.test_email }}" = "true" ]; then
-            python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --test-email
+            python scraper.py --max-pages 8 --max-new-details 120 --test-email
           else
-            python scraper.py --max-pages 2 --overlap-days 7 --max-new-details 50 --send-email
+            python scraper.py --max-pages 8 --max-new-details 120 --send-email
           fi
       - name: Show collected state
-        if: ${{ inputs.check_subscribers != 'true' }}
+        if: ${{ always() && hashFiles('ipk.sqlite3') != '' && inputs.check_subscribers != true }}
         run: |
           python - <<'PY'
           import sqlite3
-          db = sqlite3.connect('ipk.sqlite3')
-          rows = db.execute('select ipk_date, number, source_url from ipk order by ipk_date desc, id desc limit 15').fetchall()
-          print('DB rows:', db.execute('select count(*) from ipk').fetchone()[0])
+          db = sqlite3.connect("ipk.sqlite3")
+          rows = db.execute("select ipk_date, number from ipk order by id desc limit 10").fetchall()
+          pending = db.execute("select count(*) from ipk where emailed_at is null").fetchone()[0]
+          print("DB rows:", db.execute("select count(*) from ipk").fetchone()[0])
+          print("Pending email:", pending)
           for row in rows:
               print(row)
           PY
-      - name: Save SQLite state
-        if: ${{ inputs.check_subscribers != 'true' }}
+      - name: Save SQLite state even when mail delivery failed
+        if: ${{ always() && hashFiles('ipk.sqlite3') != '' && inputs.check_subscribers != true }}
         run: |
           git config user.name "IPK Bot"
           git config user.email "ipk-bot@users.noreply.github.com"
           git add ipk.sqlite3
           git diff --cached --quiet || git commit -m "Update IPK database"
           git push
+
+  report:
+    needs: [verify, collect]
+    if: ${{ always() && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or resolve a GitHub issue to report an unhealthy monitor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RESULT_VERIFY: ${{ needs.verify.result }}
+          RESULT_COLLECT: ${{ needs.collect.result }}
+          RUN_LINK: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          title="IPK Monitor: collector failed"
+          existing="$(gh issue list --repo "$REPO" --state open --limit 100 --json number,title --jq '.[] | select(.title == "IPK Monitor: collector failed") | .number' | head -n1)"
+          if [[ "$RESULT_VERIFY" == "success" && "$RESULT_COLLECT" == "success" ]]; then
+            if [[ -n "$existing" ]]; then
+              gh issue close "$existing" --repo "$REPO" --comment "Monitor recovered: $RUN_LINK"
+            fi
+          else
+            body="IPK Monitor failure. Verify: $RESULT_VERIFY, collect: $RESULT_COLLECT. Run: $RUN_LINK. Please investigate source access, outgoing email, and pending SQLite outbox. @mrdimchyk"
+            if [[ -n "$existing" ]]; then
+              gh issue comment "$existing" --repo "$REPO" --body "$body"
+            else
+              gh issue create --repo "$REPO" --title "$title" --body "$body"
+            fi
+          fi
