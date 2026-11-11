@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS ipk (
 CREATE INDEX IF NOT EXISTS idx_ipk_date ON ipk(ipk_date);
 CREATE INDEX IF NOT EXISTS idx_ipk_number ON ipk(number);
 CREATE TABLE IF NOT EXISTS monitor_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS descriptive_recap_sent (
+  source_url TEXT PRIMARY KEY,
+  accepted_at TEXT NOT NULL
+);
 """
 
 @dataclass
@@ -233,6 +237,42 @@ class Scraper:
         )
         self.db.commit()
 
+    def recap_completed(self):
+        row = self.db.execute(
+            "SELECT value FROM monitor_meta WHERE key='descriptive_recap_20261111'"
+        ).fetchone()
+        return row is not None
+
+    def pending_descriptive_recap(self, hours=36, limit=200):
+        """One-time recap for recent items sent by the previous link-only template."""
+        cutoff = (datetime.now(timezone.utc) -
+                  timedelta(hours=hours)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        rows = self.db.execute(
+            """SELECT source_url, source_id, number, ipk_date, issuer,
+                      category, title, content
+               FROM ipk WHERE first_seen_at >= ?
+               AND emailed_at IS NOT NULL AND emailed_at != 'legacy-unverified'
+               AND source_url NOT IN (SELECT source_url FROM descriptive_recap_sent)
+               ORDER BY first_seen_at, id LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        return [Record(*row) for row in rows]
+
+    def mark_descriptive_recap(self, records):
+        now = datetime.now(timezone.utc).isoformat()
+        self.db.executemany(
+            "INSERT OR IGNORE INTO descriptive_recap_sent (source_url, accepted_at) VALUES (?, ?)",
+            [(r.url, now) for r in records],
+        )
+        self.db.commit()
+
+    def finish_descriptive_recap(self):
+        self.db.execute(
+            "INSERT OR REPLACE INTO monitor_meta (key,value) VALUES (?,?)",
+            ("descriptive_recap_20261111", datetime.now(timezone.utc).isoformat()),
+        )
+        self.db.commit()
+
     def latest_date(self):
         row = self.db.execute("SELECT MAX(ipk_date) FROM ipk").fetchone()
         return date.fromisoformat(row[0]) if row and row[0] else None
@@ -266,52 +306,142 @@ class Scraper:
                 break
         return found
 
+def _shorten(text, max_chars=330):
+    text = re.sub(r"\\s+", " ", text or "").strip()
+    if len(text) <= max_chars:
+        return text
+    trimmed = text[:max_chars].rsplit(" ", 1)[0]
+    return (trimmed or text[:max_chars]).rstrip(" .,;:") + "…"
+
+
+def describe_consultation(rec):
+    """Source-based, non-AI description; never fabricate a tax conclusion."""
+    raw = re.sub(r"\\s+", " ", rec.content or "").strip()
+    if not raw:
+        return ("Зміст документа не вдалося виділити автоматично. "
+                "Перевірте повний текст за посиланням.", "")
+    # Most IPKs open with identical legal headers, which are not useful summaries.
+    intro = re.search(r"\\b(?:Товариство|Підприємство|Платник податків|"
+                      r"Фізична особа|Підприємець|ФОП|Заявник|"
+                      r"У зверненні|У запиті|У листі)\\b", raw, re.I)
+    if intro and intro.start() < 3500:
+        body = raw[intro.start():]
+    else:
+        marker = re.search(r"повідомляє\\s*[.:]", raw[:2500], re.I)
+        body = raw[marker.end():].strip() if marker else raw
+    # For the "position" field take only a source fragment after a strong
+    # conclusion cue; exclude the standard 52.2 IPK personal-effect disclaimer.
+    conclusions = list(re.finditer(
+        r"\\b(?:Таким чином|Отже|З огляду на викладене|"
+        r"Враховуючи викладене|Враховуючи наведене|Зважаючи на викладене)\\b",
+        raw, re.I))
+    conclusion = ""
+    for match in reversed(conclusions):
+        fragment = raw[match.start():]
+        if "індивідуальний характер" in fragment[:240].lower():
+            continue
+        if match.start() < len(raw) * 0.25:
+            continue
+        conclusion = _shorten(fragment, 310)
+        break
+    question = _shorten(body, 430)
+    return (question or "Перегляньте повний текст ІПК.", conclusion)
+
+
 def digest_html(records):
     today = date.today().strftime("%d.%m.%Y")
     if not records:
-        return f"<!doctype html><html><body><h2>ІПК — {today}</h2><p>Нових ІПК не знайдено.</p></body></html>"
-    parts = ["<!doctype html><html><body>", f"<h2>Нові ІПК — {today}</h2>", f"<p><b>Кількість: {len(records)}</b></p><ul>"]
-    for r in records:
-        parts.append(f'<li><b>{escape(r.ipk_date)}</b> — <a href="{escape(r.url)}">{escape(r.number)}</a></li>')
-    parts.append("</ul></body></html>")
-    return "".join(parts)
+        return f"<html><body><h2>IPK Monitor — {today}</h2><p>Нових ІПК не виявлено.</p></body></html>"
+    parts = [
+        '<!doctype html><html lang="uk"><body style="font-family:Arial,sans-serif;color:#202b24">',
+        f'<h2>ІПК з описом — {escape(today)}</h2>',
+        f'<p>Консультацій у листі: <b>{len(records)}</b>.</p>',
+        '<p style="color:#555">Описи формуються автоматично з тексту ІПК без ШІ; '
+        'це фрагменти джерела, а не юридичні висновки.</p>'
+    ]
+    for rec in records:
+        question, conclusion = describe_consultation(rec)
+        parts.extend([
+            '<section style="padding:12px 0;border-top:1px solid #d9e2dc">',
+            f'<h3 style="margin:4px 0">ІПК № {escape(rec.number)}</h3>',
+            f'<p><b>Дата:</b> {escape(rec.ipk_date)}'
+            f' &nbsp; <b>Рубрика:</b> {escape(rec.category or "Не вказано")}</p>',
+            f'<p><b>Суть питання (фрагмент):</b> {escape(question)}</p>',
+        ])
+        if conclusion:
+            parts.append(
+                f'<p><b>Позиція з тексту ІПК (фрагмент):</b> {escape(conclusion)}</p>'
+            )
+        parts.append(
+            f'<p><a href="{escape(rec.url, quote=True)}">Повний текст ІПК</a></p></section>'
+        )
+    parts.append(
+        '<p style="color:#777;font-size:12px">ІПК має індивідуальний характер. '
+        'Перед застосуванням висновків перевірте оригінал документа.</p></body></html>'
+    )
+    return "\\n".join(parts)
+
 
 def digest_text(records):
     if not records:
-        return "Нових ІПК не знайдено."
-    return "\n".join([f"Нових ІПК: {len(records)}", ""] + [f"{r.ipk_date} | {r.number} | {r.url}" for r in records])
+        return "Нових ІПК не виявлено."
+    parts = [f"ІПК з описом: {len(records)}", "",
+             "Автоматичні фрагменти тексту, а не юридичні висновки.", ""]
+    for rec in records:
+        question, conclusion = describe_consultation(rec)
+        parts.extend([f"ІПК № {rec.number} ({rec.ipk_date})",
+                      f"Рубрика: {rec.category}",
+                      f"Суть питання (фрагмент): {question}"])
+        if conclusion:
+            parts.append(f"Позиція з тексту (фрагмент): {conclusion}")
+        parts.extend([f"Джерело: {rec.url}", ""])
+    return "\\n".join(parts)
+
 
 def get_recipients():
+    """Use subscriber endpoint if available, with MAIL_TO and monitor copy as fallback."""
     subscribers_url = os.getenv("SUBSCRIBERS_URL", "").strip()
     subscribers_token = os.getenv("SUBSCRIBERS_TOKEN", "").strip()
     legacy = [x.strip() for x in os.getenv("MAIL_TO", "").split(",") if x.strip()]
-
+    monitor = os.getenv("MONITOR_MAILBOX", "").strip()
+    recipients = []
     if subscribers_url:
         if not subscribers_token:
-            raise RuntimeError("SUBSCRIBERS_URL is set but SUBSCRIBERS_TOKEN is missing")
-        try:
-            r = requests.get(
-                subscribers_url,
-                params={"action": "list", "token": subscribers_token},
-                timeout=20,
-                headers={"User-Agent": "IPK-Digest/2.3"},
-            )
-            r.raise_for_status()
-            data = r.json()
-            if not data.get("ok"):
-                raise RuntimeError("Subscriber service rejected the request")
-            recipients = [str(x).strip() for x in data.get("subscribers", []) if str(x).strip()]
-            recipients.extend(legacy)
-            recipients = list(dict.fromkeys(recipients))
-            print(f"[SUBSCRIBERS] active={len(recipients)}")
-            return recipients
-        except Exception as exc:
-            raise RuntimeError(f"Unable to load subscribers: {exc}") from exc
+            print("[WARN] Subscriber endpoint configured without token; using fallback.",
+                  file=sys.stderr)
+        else:
+            try:
+                r = requests.get(
+                    subscribers_url,
+                    params={"action": "list", "token": subscribers_token},
+                    timeout=20,
+                    headers={"User-Agent": "IPK-Digest/2.4"},
+                )
+                r.raise_for_status()
+                data = r.json()
+                if not data.get("ok"):
+                    raise RuntimeError("Subscriber endpoint rejected request")
+                recipients.extend(str(x).strip() for x in data.get("subscribers", []))
+                print(f"[SUBSCRIBERS] endpoint_active={len(recipients)}")
+            except Exception as exc:
+                print(f"[WARN] Subscriber endpoint unavailable ({type(exc).__name__}); "
+                      "sending to configured fallback.", file=sys.stderr)
+    recipients.extend(legacy)
+    if monitor:
+        recipients.append(monitor)
+    seen, out = set(), []
+    for item in recipients:
+        email = item.strip().lower()
+        if not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
+            continue
+        if email not in seen:
+            out.append(email)
+            seen.add(email)
+    if not out:
+        raise RuntimeError("No recipients configured. Set MAIL_TO, MONITOR_MAILBOX or a subscriber endpoint.")
+    print(f"[SUBSCRIBERS] recipients={len(out)}, dedicated_monitor={'yes' if monitor else 'no'}")
+    return out
 
-    if legacy:
-        print(f"[SUBSCRIBERS] using MAIL_TO fallback: {len(legacy)}")
-        return list(dict.fromkeys(legacy))
-    raise RuntimeError("No recipients configured. Set SUBSCRIBERS_URL/SUBSCRIBERS_TOKEN or MAIL_TO")
 
 def send_email(records, subject=None, body=None):
     required = ["SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD"]
@@ -351,6 +481,7 @@ def main():
     p.add_argument("--max-new-details", type=int, default=120)
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
+    p.add_argument("--descriptive-recap-once", action="store_true", help="One-time recap of recently delivered link-only IPKs with source descriptions")
     p.add_argument("--test-email", action="store_true", help="Send a test email even when there are no new IPKs")
     p.add_argument("--check-subscribers", action="store_true", help="Validate subscriber endpoint and print active count without scraping or sending mail")
     p.add_argument("--strict-tls", action="store_true", help="Do not allow the known VOBU mirror certificate workaround")
@@ -374,6 +505,21 @@ def main():
             print(f"[OUTBOX] accepted={len(batch)} remaining={len(scraper.pending_records())}")
     elif args.send_email:
         print("[MAIL] No pending consultations to send.")
+    if args.descriptive_recap_once and args.send_email and not scraper.recap_completed():
+        recap = scraper.pending_descriptive_recap(hours=36, limit=200)
+        print(f"[RECAP] pending_descriptive={len(recap)}")
+        for offset in range(0, len(recap), 50):
+            batch = recap[offset:offset + 50]
+            send_email(
+                batch,
+                subject=(f"IPK Monitor — описи ІПК (відновлення) "
+                         f"{date.today().strftime('%d.%m.%Y')} "
+                         f"частина {offset // 50 + 1}/{(len(recap) + 49) // 50}")
+            )
+            scraper.mark_descriptive_recap(batch)
+        if not scraper.pending_descriptive_recap(hours=36, limit=1):
+            scraper.finish_descriptive_recap()
+        print("[RECAP] complete=" + str(scraper.recap_completed()))
     scraper.db.close()
 
 if __name__ == "__main__":
