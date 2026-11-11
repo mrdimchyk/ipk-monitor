@@ -9,7 +9,7 @@ import time
 import smtplib
 import ssl
 from dataclasses import dataclass
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 from email.message import EmailMessage
 from urllib.parse import urljoin, urlparse
 from html import escape
@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS ipk (
 );
 CREATE INDEX IF NOT EXISTS idx_ipk_date ON ipk(ipk_date);
 CREATE INDEX IF NOT EXISTS idx_ipk_number ON ipk(number);
+CREATE TABLE IF NOT EXISTS monitor_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 @dataclass
@@ -60,6 +61,7 @@ class Scraper:
         self.db = sqlite3.connect(db_path)
         self.db.executescript(SCHEMA)
         self.db.commit()
+        self._initialize_outbox()
         self.delay = delay
         self.allow_insecure_mirror = allow_insecure_mirror
         self.session = requests.Session()
@@ -70,21 +72,65 @@ class Scraper:
         self.timeout = timeout
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+    def _initialize_outbox(self):
+        """Do not resend the entire legacy archive on first deployment.
+
+        Pre-existing emailed_at=NULL rows were collected by an old version that
+        did not track delivery. Their delivery is UNVERIFIED, not proven.
+        New records are inserted after this one-time migration.
+        """
+        marker = self.db.execute(
+            "SELECT value FROM monitor_meta WHERE key='outbox_v1_initialized'"
+        ).fetchone()
+        if marker is None:
+            count = self.db.execute(
+                "SELECT COUNT(*) FROM ipk WHERE emailed_at IS NULL"
+            ).fetchone()[0]
+            self.db.execute(
+                "UPDATE ipk SET emailed_at='legacy-unverified' WHERE emailed_at IS NULL"
+            )
+            self.db.execute(
+                "INSERT INTO monitor_meta (key, value) VALUES ('outbox_v1_initialized', ?)",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+            self.db.commit()
+            if count:
+                print(
+                    f"[MIGRATION] {count} existing rows marked legacy-unverified; "
+                    "historical email delivery must be audited separately.",
+                    file=sys.stderr,
+                )
+
     def get(self, url):
         host = urlparse(url).hostname or ""
         verify = not (host == MIRROR_HOST and self.allow_insecure_mirror)
-        if not verify:
-            print("[WARN] VOBU mirror certificate hostname mismatch; using TLS with certificate verification disabled for this known public host only.", file=sys.stderr)
-        try:
-            r = self.session.get(url, timeout=self.timeout, verify=verify)
-        except requests.exceptions.SSLError:
-            if host == MIRROR_HOST and self.allow_insecure_mirror:
-                r = self.session.get(url, timeout=self.timeout, verify=False)
-            else:
-                raise
-        r.raise_for_status()
-        r.encoding = r.apparent_encoding or r.encoding
-        return r
+        if not verify and not getattr(self, "_warned_insecure_mirror", False):
+            self._warned_insecure_mirror = True
+            print(
+                "[WARN] Mirror TLS hostname mismatch: certificate validation is "
+                "disabled ONLY for the known peredplata.vobu.ua host. "
+                "Fix the upstream certificate / move to a trusted source.",
+                file=sys.stderr,
+            )
+        for attempt in range(3):
+            try:
+                response = self.session.get(url, timeout=self.timeout, verify=verify)
+                response.raise_for_status()
+                response.encoding = response.apparent_encoding or response.encoding
+                return response
+            except (requests.exceptions.Timeout,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.HTTPError) as exc:
+                if isinstance(exc, requests.exceptions.HTTPError):
+                    status = exc.response.status_code if exc.response is not None else 0
+                    if status not in (429, 500, 502, 503, 504):
+                        raise
+                if attempt >= 2:
+                    raise
+                pause = 2 ** (attempt + 1)
+                print(f"[RETRY] {type(exc).__name__} on {host}; "
+                      f"attempt {attempt + 2}/3 in {pause}s", file=sys.stderr)
+                time.sleep(pause)
 
     @staticmethod
     def clean(s):
@@ -167,13 +213,33 @@ class Scraper:
         """, (rec.url, rec.source_id, rec.number, rec.ipk_date, rec.issuer, rec.category, rec.title, rec.content, digest, now, now))
         self.db.commit()
 
+    def pending_records(self):
+        """Persistently retry mail that has not been accepted by SMTP."""
+        rows = self.db.execute(
+            """SELECT source_url, source_id, number, ipk_date, issuer,
+                      category, title, content
+               FROM ipk WHERE emailed_at IS NULL
+               ORDER BY first_seen_at, id"""
+        ).fetchall()
+        return [Record(*row) for row in rows]
+
+    def mark_emailed(self, records):
+        if not records:
+            return
+        accepted_at = datetime.now(timezone.utc).isoformat()
+        self.db.executemany(
+            "UPDATE ipk SET emailed_at=? WHERE source_url=? AND emailed_at IS NULL",
+            [(accepted_at, item.url) for item in records],
+        )
+        self.db.commit()
+
     def latest_date(self):
         row = self.db.execute("SELECT MAX(ipk_date) FROM ipk").fetchone()
         return date.fromisoformat(row[0]) if row and row[0] else None
 
-    def collect(self, max_pages=1, overlap_days=7, max_new_details=10):
-        latest = self.latest_date()
-        cutoff = latest - timedelta(days=overlap_days) if latest else None
+    def collect(self, max_pages=8, overlap_days=7, max_new_details=120):
+        # Scan all configured pages: a late-published IPK may have an older document date.
+        # overlap_days is retained solely for compatibility with older CLI callers.
         found = []
         for page in range(1, max_pages + 1):
             url = BASE_URL if page == 1 else f"{BASE_URL}?page={page}"
@@ -182,10 +248,10 @@ class Scraper:
             records = self.parse_listing(response.text, response.url)
             print(f"[LIST] parsed={len(records)}", file=sys.stderr)
             if not records:
+                if page == 1:
+                    raise RuntimeError('No IPK entries parsed from first listing page')
                 break
             for rec in records:
-                if cutoff and date.fromisoformat(rec.ipk_date) < cutoff:
-                    continue
                 if self.exists(rec):
                     continue
                 if len(found) >= max_new_details:
@@ -260,7 +326,7 @@ def send_email(records, subject=None, body=None):
     msg = EmailMessage()
     msg["From"] = os.environ["SMTP_USER"]
     msg["To"] = ", ".join(recipients)
-    msg["Subject"] = subject or f"Нові ІПК — {date.today().strftime('%d.%m.%Y')}"
+    msg["Subject"] = subject or f"IPK Monitor — нові ІПК за {date.today().strftime('%d.%m.%Y')}"
     msg.set_content(body if body is not None else digest_text(records))
     msg.add_alternative(digest_html(records), subtype="html")
 
@@ -280,9 +346,9 @@ def send_email(records, subject=None, body=None):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--db", default="ipk.sqlite3")
-    p.add_argument("--max-pages", type=int, default=1)
+    p.add_argument("--max-pages", type=int, default=8)
     p.add_argument("--overlap-days", type=int, default=7)
-    p.add_argument("--max-new-details", type=int, default=10)
+    p.add_argument("--max-new-details", type=int, default=120)
     p.add_argument("--delay", type=float, default=0.2)
     p.add_argument("--send-email", action="store_true")
     p.add_argument("--test-email", action="store_true", help="Send a test email even when there are no new IPKs")
@@ -295,11 +361,20 @@ def main():
         return
     scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
+    pending = scraper.pending_records()
+    print(f"[OUTBOX] newly_collected={len(new_records)} pending_delivery={len(pending)}")
     print(digest_text(new_records))
     if args.test_email:
         send_email([], subject=f"IPK Monitor test — {date.today().strftime('%d.%m.%Y')}", body="Тестова розсилка IPK Monitor через Gmail SMTP успішна.")
-    elif args.send_email and new_records:
-        send_email(new_records)
+    elif args.send_email and pending:
+        for offset in range(0, len(pending), 50):
+            batch = pending[offset:offset + 50]
+            send_email(batch)
+            scraper.mark_emailed(batch)
+            print(f"[OUTBOX] accepted={len(batch)} remaining={len(scraper.pending_records())}")
+    elif args.send_email:
+        print("[MAIL] No pending consultations to send.")
+    scraper.db.close()
 
 if __name__ == "__main__":
     main()
