@@ -243,7 +243,7 @@ class Scraper:
         ).fetchone()
         return row is not None
 
-    def pending_descriptive_recap(self, hours=36, limit=200):
+    def pending_descriptive_recap(self, hours=36, limit=200, emailed_before=None):
         """One-time recap for recent items sent by the previous link-only template."""
         cutoff = (datetime.now(timezone.utc) -
                   timedelta(hours=hours)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -252,9 +252,10 @@ class Scraper:
                       category, title, content
                FROM ipk WHERE first_seen_at >= ?
                AND emailed_at IS NOT NULL AND emailed_at != 'legacy-unverified'
+               AND (? IS NULL OR emailed_at < ?)
                AND source_url NOT IN (SELECT source_url FROM descriptive_recap_sent)
                ORDER BY first_seen_at, id LIMIT ?""",
-            (cutoff, limit),
+            (cutoff, emailed_before, emailed_before, limit),
         ).fetchall()
         return [Record(*row) for row in rows]
 
@@ -490,6 +491,7 @@ def main():
         recipients = get_recipients()
         print(f"Subscriber check OK: {len(recipients)} active recipient(s).")
         return
+    run_started_at = datetime.now(timezone.utc).isoformat()
     scraper = Scraper(args.db, delay=args.delay, allow_insecure_mirror=not args.strict_tls)
     new_records = scraper.collect(args.max_pages, args.overlap_days, args.max_new_details)
     pending = scraper.pending_records()
@@ -505,8 +507,10 @@ def main():
             print(f"[OUTBOX] accepted={len(batch)} remaining={len(scraper.pending_records())}")
     elif args.send_email:
         print("[MAIL] No pending consultations to send.")
-    if args.descriptive_recap_once and args.send_email and not scraper.recap_completed():
-        recap = scraper.pending_descriptive_recap(hours=36, limit=200)
+    if (args.descriptive_recap_once and args.send_email
+            and not args.test_email and not scraper.recap_completed()):
+        recap = scraper.pending_descriptive_recap(hours=36, limit=200,
+                                                  emailed_before=run_started_at)
         print(f"[RECAP] pending_descriptive={len(recap)}")
         for offset in range(0, len(recap), 50):
             batch = recap[offset:offset + 50]
@@ -517,7 +521,8 @@ def main():
                          f"частина {offset // 50 + 1}/{(len(recap) + 49) // 50}")
             )
             scraper.mark_descriptive_recap(batch)
-        if not scraper.pending_descriptive_recap(hours=36, limit=1):
+        if not scraper.pending_descriptive_recap(hours=36, limit=1,
+                                                 emailed_before=run_started_at):
             scraper.finish_descriptive_recap()
         print("[RECAP] complete=" + str(scraper.recap_completed()))
     scraper.db.close()
